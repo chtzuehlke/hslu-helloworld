@@ -5,6 +5,7 @@ aws cloudformation update-stack --stack-name helloworld --template-body file://.
     --parameters    ParameterKey=Subnets,UsePreviousValue=true \
                     ParameterKey=VPC,UsePreviousValue=true \
                     ParameterKey=DockerImage,UsePreviousValue=true \
-                    ParameterKey=DesiredCount,UsePreviousValue=true
+                    ParameterKey=DesiredCount,UsePreviousValue=true \
+                    ParameterKey=ServiceName,UsePreviousValue=true
 
 aws cloudformation wait stack-update-complete --stack-name helloworld

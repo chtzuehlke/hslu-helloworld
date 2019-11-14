@@ -1,26 +1,32 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Parameters:
-  Subnets:
-    Type: "List<AWS::EC2::Subnet::Id>"
-
   VPC:
     Type: "AWS::EC2::VPC::Id"
 
+  Subnets:
+    Type: "List<AWS::EC2::Subnet::Id>"
+
   DockerImage:
     Type: String
+    Default: foo.bar:none
 
   DesiredCount:
     Type: Number    
+    Default: 0
+
+  ServiceName:
+    Type: String
+    AllowedPattern: "[a-z0-9]+"
 
 Resources:
   CodeBuildProject:
     Type: "AWS::CodeBuild::Project"
     Properties:
-      Name: !Sub '${AWS::StackName}'
+      Name: !Ref ServiceName
       Artifacts:
         EncryptionDisabled: true
-        Name: !Sub '${AWS::StackName}'
+        Name: !Ref ServiceName
         Packaging: NONE
         Type: CODEPIPELINE
       Environment:
@@ -28,7 +34,7 @@ Resources:
         EnvironmentVariables:
           - Name: STACK_NAME
             Type: PLAINTEXT
-            Value: !Sub '${AWS::StackName}'
+            Value: !Ref "AWS::StackName"
           - Name: REPOSITORY_URI
             Type: PLAINTEXT
             Value: !Join
@@ -64,7 +70,7 @@ Resources:
                 - mvn -B clean install docker:build
                 - docker tag $DOCKER_IMAGE_NAME:latest $REPOSITORY_URI:latest
                 - docker push $REPOSITORY_URI:latest
-                - aws cloudformation update-stack --stack-name $STACK_NAME --use-previous-template --capabilities CAPABILITY_IAM --parameters ParameterKey=Subnets,UsePreviousValue=true ParameterKey=VPC,UsePreviousValue=true ParameterKey=DesiredCount,ParameterValue=1 ParameterKey=DockerImage,ParameterValue=$REPOSITORY_URI:latest
+                - aws cloudformation update-stack --stack-name $STACK_NAME --use-previous-template --capabilities CAPABILITY_IAM --parameters ParameterKey=Subnets,UsePreviousValue=true ParameterKey=VPC,UsePreviousValue=true ParameterKey=ServiceName,UsePreviousValue=true ParameterKey=DesiredCount,ParameterValue=1 ParameterKey=DockerImage,ParameterValue=$REPOSITORY_URI:latest
           artifacts:
               files: 
                 - images.json
@@ -93,7 +99,7 @@ Resources:
   CodePipeline:
     Type: "AWS::CodePipeline::Pipeline"
     Properties:
-      Name: !Sub '${AWS::StackName}'
+      Name: !Ref ServiceName
       ArtifactStores:
         - ArtifactStore:
             Location: !Ref PipelineArtifactStoreBucket
@@ -207,7 +213,7 @@ Resources:
   LoadBalancer:
     Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
     Properties:
-      Name: !Sub '${AWS::StackName}' 
+      Name: !Ref ServiceName
       LoadBalancerAttributes:
         - Key: idle_timeout.timeout_seconds
           Value: 60
@@ -273,12 +279,13 @@ Resources:
   FargateCluster:
     Type: "AWS::ECS::Cluster"
     Properties:
-      ClusterName: !Sub '${AWS::StackName}'
+      ClusterName: !Ref ServiceName
 
   FargateService:
     Type: "AWS::ECS::Service"
     DependsOn: Listener
     Properties:
+      ServiceName: !Ref ServiceName
       Cluster: !Ref FargateCluster
       DeploymentConfiguration:
         MaximumPercent: 200
@@ -338,7 +345,7 @@ Resources:
               Protocol: tcp
       Cpu: "1024"
       ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
-      Family: !Sub '${AWS::StackName}'
+      Family: !Ref ServiceName
       Memory: "2048"
       NetworkMode: awsvpc
       RequiresCompatibilities:
@@ -350,13 +357,13 @@ Resources:
       LogGroupName: !Join
         - ""
         - - /ecs/
-          - !Sub '${AWS::StackName}'
+          - !Ref ServiceName
       RetentionInDays: 7
 
   CodeCommitRepository:
     Type: "AWS::CodeCommit::Repository"
     Properties:
-      RepositoryName: !Sub '${AWS::StackName}'
+      RepositoryName: !Ref ServiceName
 
   CodeBuildCacheBucket:
     Type: "AWS::S3::Bucket"
@@ -366,7 +373,7 @@ Resources:
     Type: "AWS::ECR::Repository"
     DeletionPolicy: Delete
     Properties:
-      RepositoryName: !Sub '${AWS::StackName}'
+      RepositoryName: !Ref ServiceName
 
   EmptyBucketAndRepo:
     Type: AWS::CloudFormation::CustomResource

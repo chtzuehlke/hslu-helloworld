@@ -8,6 +8,7 @@ aws cloudformation create-stack --stack-name helloworld --template-body file://.
     --parameters    ParameterKey=Subnets,ParameterValue=\"$SUBNET_IDS\" \
                     ParameterKey=VPC,ParameterValue=$DEFAULT_VPC_ID \
                     ParameterKey=DockerImage,ParameterValue=foo.bar:none \
-                    ParameterKey=DesiredCount,ParameterValue=0
+                    ParameterKey=DesiredCount,ParameterValue=0 \
+                    ParameterKey=ServiceName,ParameterValue=helloworld
 
 aws cloudformation wait stack-create-complete --stack-name helloworld
