@@ -71,9 +71,6 @@ Resources:
                 - docker tag $DOCKER_IMAGE_NAME:latest $REPOSITORY_URI:latest
                 - docker push $REPOSITORY_URI:latest
                 - aws cloudformation update-stack --stack-name $STACK_NAME --use-previous-template --capabilities CAPABILITY_IAM --parameters ParameterKey=Subnets,UsePreviousValue=true ParameterKey=VPC,UsePreviousValue=true ParameterKey=ServiceName,UsePreviousValue=true ParameterKey=DesiredCount,ParameterValue=1 ParameterKey=DockerImage,ParameterValue=$REPOSITORY_URI:latest
-          artifacts:
-              files: 
-                - images.json
           cache:
             paths:
               - '/root/.m2/**/*'
@@ -135,8 +132,6 @@ Resources:
               InputArtifacts:
                 - Name: SourceArtifact
               Name: Build
-              OutputArtifacts:
-                - Name: DeployArtifact 
               Region: !Ref "AWS::Region"
               RunOrder: 1
           Name: Build
