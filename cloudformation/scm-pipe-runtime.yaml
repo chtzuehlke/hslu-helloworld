@@ -1,0 +1,561 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  Subnets:
+    Type: "List<AWS::EC2::Subnet::Id>"
+
+  VPC:
+    Type: "AWS::EC2::VPC::Id"
+
+  DockerImage:
+    Type: String
+
+  DesiredCount:
+    Type: Number    
+
+Resources:
+  CodeBuildProject:
+    Type: "AWS::CodeBuild::Project"
+    Properties:
+      Name: !Sub '${AWS::StackName}'
+      Artifacts:
+        EncryptionDisabled: true
+        Name: !Sub '${AWS::StackName}'
+        Packaging: NONE
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: STACK_NAME
+            Type: PLAINTEXT
+            Value: !Sub '${AWS::StackName}'
+          - Name: REPOSITORY_URI
+            Type: PLAINTEXT
+            Value: !Join
+              - ""
+              - - Ref: "AWS::AccountId"
+                - .dkr.ecr.
+                - Ref: "AWS::Region"
+                - .amazonaws.com/
+                - Ref: ECRRepository
+        Image: "aws/codebuild/java:openjdk-8"
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: true
+        Type: LINUX_CONTAINER
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+        S3Logs:
+          Status: DISABLED
+      QueuedTimeoutInMinutes: 60
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Source:
+        InsecureSsl: false
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - $(aws ecr get-login --region $AWS_DEFAULT_REGION --no-include-email)
+            build:
+              commands:
+                - export DOCKER_IMAGE_NAME=application
+                - mvn -B clean install docker:build
+                - docker tag $DOCKER_IMAGE_NAME:latest $REPOSITORY_URI:latest
+                - docker push $REPOSITORY_URI:latest
+                - aws cloudformation update-stack --stack-name $STACK_NAME --use-previous-template --capabilities CAPABILITY_IAM --parameters ParameterKey=Subnets,UsePreviousValue=true ParameterKey=VPC,UsePreviousValue=true ParameterKey=DesiredCount,ParameterValue=1 ParameterKey=DockerImage,ParameterValue=$REPOSITORY_URI:latest
+          artifacts:
+              files: 
+                - images.json
+          cache:
+            paths:
+              - '/root/.m2/**/*'
+      TimeoutInMinutes: 60
+
+  CodeBuildRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AdministratorAccess"
+      MaxSessionDuration: 3600
+      Path: /service-role/
+
+  CodePipeline:
+    Type: "AWS::CodePipeline::Pipeline"
+    Properties:
+      Name: !Sub '${AWS::StackName}'
+      ArtifactStores:
+        - ArtifactStore:
+            Location: !Ref PipelineArtifactStoreBucket
+            Type: S3
+          Region: !Ref "AWS::Region"
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: "1"
+              Configuration:
+                BranchName: master
+                PollForSourceChanges: "false"
+                RepositoryName: !GetAtt CodeCommitRepository.Name
+              Name: Source
+              OutputArtifacts:
+                - Name: SourceArtifact
+              Region: !Ref "AWS::Region"
+              RunOrder: 1
+
+        - Actions:
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: SourceArtifact
+              Name: Build
+              OutputArtifacts:
+                - Name: DeployArtifact 
+              Region: !Ref "AWS::Region"
+              RunOrder: 1
+          Name: Build
+
+  CodePipelineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AdministratorAccess"
+      MaxSessionDuration: 3600
+      Path: /service-role/
+
+  CodePipelineTriggerEventRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      EventPattern:
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceName:
+            - master
+          referenceType:
+            - branch
+        detail-type:
+          - CodeCommit Repository State Change
+        resources:
+          - !GetAtt CodeCommitRepository.Arn
+        source:
+          - aws.codecommit
+      Targets:
+        - Arn: !Join
+            - ""
+            - - "arn:aws:codepipeline:"
+              - Ref: "AWS::Region"
+              - ":"
+              - Ref: "AWS::AccountId"
+              - ":"
+              - Ref: CodePipeline
+          Id: codepipeline
+          RoleArn: !GetAtt TriggerEventRole.Arn
+
+  PipelineArtifactStoreBucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Delete
+
+  #FIXME https://docs.aws.amazon.com/codepipeline/latest/userguide/create-cwe-ecr-source-cfn.html    
+  TriggerEventRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AdministratorAccess"
+      MaxSessionDuration: 3600
+      Path: /service-role/
+
+  LoadBalancer:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      Name: !Sub '${AWS::StackName}' 
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: 60
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Subnets: !Ref Subnets
+
+  LoadBalancerSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: HTTP 80
+      SecurityGroupIngress:
+        - CidrIp: "0.0.0.0/0"
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+      VpcId: !Ref VPC
+
+  Listener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  TargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckTimeoutSeconds: 2
+      HealthyThresholdCount: 2
+      Port: 8080
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60
+      TargetType: ip
+      UnhealthyThresholdCount: 4
+      VpcId: !Ref VPC
+
+  ECSExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+      MaxSessionDuration: 3600
+      Path: /service-role/
+
+  FargateCluster:
+    Type: "AWS::ECS::Cluster"
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}'
+
+  FargateService:
+    Type: "AWS::ECS::Service"
+    DependsOn: Listener
+    Properties:
+      Cluster: !Ref FargateCluster
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      LoadBalancers:
+        - ContainerName: application
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TargetGroup
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - Ref: FargateSecurityGroup
+          Subnets: !Ref Subnets
+      PlatformVersion: LATEST
+      SchedulingStrategy: REPLICA
+      TaskDefinition: !Ref TaskDefinition
+
+  FargateSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: HTTP 8080
+      SecurityGroupIngress:
+        - FromPort: 8080
+          IpProtocol: tcp
+          SourceSecurityGroupId: !GetAtt LoadBalancerSecurityGroup.GroupId
+          ToPort: 8080          
+      VpcId: !Ref VPC
+
+  TaskDefinition:
+    Type: "AWS::ECS::TaskDefinition"
+    Properties:
+      ContainerDefinitions:
+        - Cpu: "1024"
+          Essential: true
+          Image: !Join
+            - ""
+            - - Ref: "AWS::AccountId"
+              - .dkr.ecr.
+              - Ref: "AWS::Region"
+              - .amazonaws.com/
+              - !Ref ECRRepository
+              - ":latest"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TaskLogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: ecs
+          Memory: "2048"
+          MemoryReservation: "2048"
+          Name: application
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+      Cpu: "1024"
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      Family: !Sub '${AWS::StackName}'
+      Memory: "2048"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+
+  TaskLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: !Join
+        - ""
+        - - /ecs/
+          - !Sub '${AWS::StackName}'
+      RetentionInDays: 7
+
+  CodeCommitRepository:
+    Type: "AWS::CodeCommit::Repository"
+    Properties:
+      RepositoryName: !Sub '${AWS::StackName}'
+
+  CodeBuildCacheBucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Delete
+
+  ECRRepository:
+    Type: "AWS::ECR::Repository"
+    DeletionPolicy: Delete
+    Properties:
+      RepositoryName: !Sub '${AWS::StackName}'
+
+  EmptyBucketAndRepo:
+    Type: AWS::CloudFormation::CustomResource
+    Properties: 
+      ServiceToken: !GetAtt EmptyBucketAndRepoLambda.Arn
+      Buckets: 
+        - !Ref CodeBuildCacheBucket
+        - !Ref PipelineArtifactStoreBucket
+      ECRRepo: !Ref ECRRepository
+
+  EmptyBucketAndRepoLambda: 
+    Type: "AWS::Lambda::Function"
+    Properties: 
+      Handler: "index.handler"
+      Role: !GetAtt EmptyBucketAndRepoLambdaRole.Arn
+      Code: 
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const url = require('url')
+          const https = require('https')
+
+          const s3 = new AWS.S3();
+          const ecr = new AWS.ECR();
+
+          async function putData(urlString = '', data = {}) {
+            var parsedUrl = url.parse(urlString)
+            var responseBody = JSON.stringify(data);
+
+            return new Promise((resolve, reject) => {
+              const options = {
+                host: parsedUrl.hostname,
+                path: parsedUrl.path,
+                port: 443,
+                method: 'PUT',
+                headers: {
+                  'content-type': '',
+                  'content-length': responseBody.length
+                }
+              };
+
+              const req = https.request(options, (res) => {
+                resolve(res.statusCode);
+
+                res.on('data', (d) => {
+                  console.log('HTTP PUT response:', d.toString());
+                });
+              });
+
+              req.on('error', (e) => {
+                reject(e);
+              });
+
+              req.write(responseBody);
+              req.end();
+            });
+          }
+
+          async function cloudFormationCallback(event = {}, status = '') {
+            const response = {
+              "Status": status,
+              "PhysicalResourceId": event.ResourceProperties['ECRRepo'],
+              "StackId": event.StackId,
+              "RequestId": event.RequestId,
+              "LogicalResourceId": event.LogicalResourceId,
+              "Data": {}
+            };
+
+            const code = await putData(event.ResponseURL, response);
+            const success = code == 200;
+
+            if (!success) {
+              console.log("CloudFormation callback failed with code:", code);
+            }
+
+            return success;
+          }
+
+          exports.handler = async (event) => {
+            try {
+              if (event.RequestType == 'Delete') {
+                const buckets = event.ResourceProperties['Buckets'];
+                for (const bucket of buckets) {
+                  var objects = null;
+                  do {
+                    const params = {
+                      Bucket: bucket,
+                      Marker: objects == null ? null : objects.NextMarker
+                    };
+                    objects = await s3.listObjects(params).promise();
+
+                    for (const object of objects.Contents) {
+                      const deleteParams = {
+                        Bucket: bucket, 
+                        Key: object.Key
+                      };
+                      await s3.deleteObject(deleteParams).promise();
+                      
+                      console.log('Deleted:', bucket, object.Key); 
+                    }
+                  }
+                  while (objects.IsTruncated);
+                }
+
+                const ecrRepo = event.ResourceProperties['ECRRepo'];
+                var images = null;
+                do {
+                    var listParams = {
+                      repositoryName: ecrRepo,
+                      nextToken: images == null ? null : images.nextToken
+                    };
+                    images = await ecr.listImages(listParams).promise();
+                    var deleteParams = {
+                      imageIds: images.imageIds, 
+                      repositoryName: ecrRepo
+                    };
+                    await ecr.batchDeleteImage(deleteParams).promise();
+
+                    console.log('Deleted:', ecrRepo, images.imageIds)
+                }
+                while (images.nextToken != null);
+              }
+
+              return {
+                success: await cloudFormationCallback(event, "SUCCESS")
+              };
+            }
+            catch (e) {
+              console.log("Error in custom resource handler:", e);
+
+              await cloudFormationCallback(event, "FAILED");
+
+              return {
+                error: e
+              };
+            }
+          };
+
+      Runtime: "nodejs10.x"
+      Timeout: 25
+    
+  EmptyBucketAndRepoLambdaRole:
+        Type: 'AWS::IAM::Role'
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                    - Effect: Allow
+                      Principal:
+                          Service: lambda.amazonaws.com
+                      Action:
+                          - 'sts:AssumeRole'
+            Policies:
+                - PolicyName: LoggingPolicy
+                  PolicyDocument:
+                      Version: 2012-10-17
+                      Statement:
+                          - Effect: Allow
+                            Action:
+                                - logs:CreateLogGroup
+                                - logs:CreateLogStream
+                                - logs:PutLogEvents
+                            Resource: '*'
+                - PolicyName: S3Policy
+                  PolicyDocument:
+                      Version: 2012-10-17
+                      Statement:
+                          - Effect: Allow
+                            Action:
+                                - s3:List*
+                                - s3:DeleteObject
+                            Resource: "*"
+                          - Effect: Allow
+                            Action:
+                                - ecr:BatchDeleteImage
+                                - ecr:ListImages
+                            Resource: 
+                              - !Sub
+                                - "arn:aws:ecr:${Region}:${Account}:repository/${RepositoryName}"
+                                - { RepositoryName: !Ref ECRRepository, Region: !Ref "AWS::Region", Account: !Ref "AWS::AccountId" }
+
+Outputs:
+  CodeCommitRepositoryCloneURL:
+    Value: !GetAtt CodeCommitRepository.CloneUrlSsh
+
+  ECRRepository:
+    Value: !Ref ECRRepository
+
+  LoadBalancer:
+    Value: !GetAtt LoadBalancer.DNSName
+
+  Service:
+    Value: !GetAtt FargateService.Name
