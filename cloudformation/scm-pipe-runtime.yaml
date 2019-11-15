@@ -7,9 +7,9 @@ Parameters:
   Subnets:
     Type: "List<AWS::EC2::Subnet::Id>"
 
-  DockerImage:
+  DockerImageTag:
     Type: String
-    Default: foo.bar:none
+    Default: none
 
   DesiredCount:
     Type: Number    
@@ -68,9 +68,11 @@ Resources:
               commands:
                 - export DOCKER_IMAGE_NAME=application
                 - mvn -B clean install docker:build
-                - docker tag $DOCKER_IMAGE_NAME:latest $REPOSITORY_URI:latest
-                - docker push $REPOSITORY_URI:latest
-                - aws cloudformation update-stack --stack-name $STACK_NAME --use-previous-template --capabilities CAPABILITY_IAM --parameters ParameterKey=Subnets,UsePreviousValue=true ParameterKey=VPC,UsePreviousValue=true ParameterKey=ServiceName,UsePreviousValue=true ParameterKey=DesiredCount,ParameterValue=1 ParameterKey=DockerImage,ParameterValue=$REPOSITORY_URI:latest
+                - DOCKER_IMAGE_TAG=$(date +%s)
+                - echo $DOCKER_IMAGE_TAG
+                - docker tag $DOCKER_IMAGE_NAME:latest $REPOSITORY_URI:$DOCKER_IMAGE_TAG
+                - docker push $REPOSITORY_URI:$DOCKER_IMAGE_TAG
+                - aws cloudformation update-stack --stack-name $STACK_NAME --use-previous-template --capabilities CAPABILITY_IAM --parameters ParameterKey=Subnets,UsePreviousValue=true ParameterKey=VPC,UsePreviousValue=true ParameterKey=ServiceName,UsePreviousValue=true ParameterKey=DesiredCount,ParameterValue=1 ParameterKey=DockerImageTag,ParameterValue=$DOCKER_IMAGE_TAG
           cache:
             paths:
               - '/root/.m2/**/*'
@@ -325,7 +327,8 @@ Resources:
               - Ref: "AWS::Region"
               - .amazonaws.com/
               - !Ref ECRRepository
-              - ":latest"
+              - ":"
+              - !Ref DockerImageTag
           LogConfiguration:
             LogDriver: awslogs
             Options:

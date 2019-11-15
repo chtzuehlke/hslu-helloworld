@@ -4,7 +4,7 @@ aws cloudformation update-stack --stack-name helloworld --template-body file://.
     --capabilities CAPABILITY_IAM \
     --parameters    ParameterKey=Subnets,UsePreviousValue=true \
                     ParameterKey=VPC,UsePreviousValue=true \
-                    ParameterKey=DockerImage,UsePreviousValue=true \
+                    ParameterKey=DockerImageTag,UsePreviousValue=true \
                     ParameterKey=DesiredCount,UsePreviousValue=true \
                     ParameterKey=ServiceName,UsePreviousValue=true
 
